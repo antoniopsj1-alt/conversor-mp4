@@ -1,0 +1,512 @@
+<!DOCTYPE html>
+<html lang="pt-BR">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Video Tools Offline</title>
+
+<!-- FFmpeg.wasm: roda o FFmpeg inteiro dentro do navegador, sem servidor.
+     Núcleo de UMA thread (não "core-mt") de propósito: a versão multi-thread
+     exige cabeçalhos especiais do servidor (COOP/COEP) que o GitHub Pages e
+     a abertura local do arquivo não conseguem fornecer. -->
+<script src="https://cdn.jsdelivr.net/npm/@ffmpeg/ffmpeg@0.12.10/dist/umd/ffmpeg.min.js"></script>
+<script src="https://cdn.jsdelivr.net/npm/@ffmpeg/util@0.12.1/dist/umd/index.min.js"></script>
+
+<style>
+*{box-sizing:border-box}
+body{font-family:Arial,sans-serif;background:#0f172a;color:#fff;display:flex;justify-content:center;padding:40px 16px}
+.card{background:#1e293b;padding:24px;border-radius:16px;width:700px;max-width:100%}
+input,select,button{width:100%;padding:12px;margin-top:10px;border-radius:8px;border:none;font-size:15px;font-family:inherit}
+select{background:#0f172a;color:#fff;border:1px solid #334155}
+/* O <input type=file> nativo não respeita largura/padding do mesmo jeito em
+   todo navegador (o botão+texto internos têm estilo próprio do sistema),
+   por isso ele desalinhava. Em vez de brigar com esse estilo nativo, ele
+   fica escondido e um botão comum (#btnFile) assume a aparência no lugar. */
+input[type=file]{display:none}
+input[type=text]{background:#0f172a;color:#fff;border:1px solid #334155}
+details{margin-top:14px;font-size:13px;color:#cbd5e1;line-height:1.5}summary{cursor:pointer;font-weight:bold}details code{background:#0f172a;padding:1px 5px;border-radius:4px}
+#btnFile{background:#0f172a;color:#fff;border:1px solid #334155;text-align:left;cursor:pointer}
+button{background:#2563eb;color:white;cursor:pointer;font-weight:bold}
+button:disabled{background:#334155;cursor:not-allowed;color:#94a3b8}
+.small{color:#cbd5e1;font-size:14px}
+.opts{display:none}
+.opts.on{display:block}
+.progwrap{background:#0f172a;border-radius:999px;height:14px;margin-top:12px;overflow:hidden;display:none}
+.progwrap.on{display:block}
+.progbar{background:linear-gradient(to right,#2563eb,#38bdf8);height:100%;width:0%;transition:width .2s}
+.progtxt{text-align:center;font-size:13px;color:#94a3b8;margin-top:6px}
+#downloadBox{display:none;margin-top:14px;background:#0f172a;border:1px solid #16a34a;border-radius:10px;padding:14px;text-align:center}
+#downloadBox.on{display:block}
+#downloadBox a{display:block;background:#16a34a;color:#fff;text-decoration:none;padding:12px;border-radius:8px;font-weight:bold;margin-top:8px}
+#logBox{background:#000;color:#4ade80;font-family:monospace;font-size:11px;border-radius:8px;padding:10px;margin-top:12px;
+  max-height:140px;overflow-y:auto;white-space:pre-wrap;display:none}
+#logBox.on{display:block}
+.toggleLog{background:none;color:#64748b;text-decoration:underline;width:auto;padding:4px 0;margin-top:10px;font-size:12px;cursor:pointer}
+.warn{background:#422006;border:1px solid #d97706;color:#fde68a;border-radius:10px;padding:10px 12px;font-size:12.5px;margin-top:14px}
+</style>
+</head>
+<body>
+<div class="card">
+<h1>Video Tools Offline</h1>
+<p class="small">Converte vídeos de vários formatos para MP4 leve e compatível com celulares, direto no navegador. Seus arquivos não são enviados para nenhum servidor.</p>
+
+<input type="file" id="file" accept="video/*,audio/*,.mkv,.avi,.mov,.webm,.flv,.wmv,.ts,.m4a,.flac,.ogg">
+<button type="button" id="btnFile">📁 Escolher arquivo</button>
+<p class="small" id="fileInfo">Nenhum arquivo selecionado</p>
+
+<select id="action">
+<option value="compress">Converter vídeo para MP4 leve (celular)</option>
+<option value="tomp3">MP4 para MP3</option>
+<option value="towebm">MP4 para WEBM</option>
+<option value="extract">Extrair Áudio (sem perder qualidade)</option>
+<option value="mp3compress">Comprimir MP3</option>
+<optgroup label="Edição simples">
+<option value="cut">✂️ Cortar um trecho (vídeo ou música)</option>
+<option value="addmusic">🎵 Colocar música num vídeo</option>
+</optgroup>
+<optgroup label="Outros formatos">
+<option value="tomkv">Converter para MKV (rápido, sem recodificar)</option>
+<option value="remux">MKV/AVI/MOV → MP4 (rápido; mantém o vídeo se já for H.264)</option>
+</optgroup>
+</select>
+
+<div class="opts on" id="optsCompress">
+  <label class="small" for="videoSize">Resolução máxima do vídeo</label>
+  <select id="videoSize">
+    <option value="1280x720" selected>720p — recomendado (boa qualidade e tamanho)</option>
+    <option value="854x480">480p — mais rápido e arquivo menor, ideal para celular</option>
+    <option value="640x360">360p — o mais rápido e o menor (tela pequena)</option>
+  </select>
+  <label class="small" for="compressLevel">Qualidade / tamanho</label>
+  <select id="compressLevel">
+    <option value="25">Mais qualidade (arquivo maior)</option>
+    <option value="28" selected>Equilibrado — recomendado</option>
+    <option value="31">Arquivo menor (qualidade reduzida)</option>
+  </select>
+</div>
+
+<div class="opts" id="optsMp3Compress">
+  <p class="small">MP3 já é um formato com perda — não existe "comprimir sem perder nada" de verdade, a não ser removendo só os metadados. Escolha:</p>
+  <select id="mp3Mode">
+    <option value="meta">Só remover metadados/capa (0% de perda no áudio, economiza pouco)</option>
+    <option value="q2" selected>Alta qualidade (perda quase imperceptível, ~190kbps)</option>
+    <option value="q4">Média qualidade (~165kbps)</option>
+    <option value="q6">Arquivo bem menor (~130kbps, perda perceptível)</option>
+  </select>
+</div>
+
+<div class="opts" id="optsCut">
+  <label class="small" for="tIni">Início (ex.: 0:30 ou 90)</label>
+  <input type="text" id="tIni" value="0:00">
+  <label class="small" for="tFim">Fim (vazio = até o final)</label>
+  <input type="text" id="tFim" placeholder="1:30">
+  <select id="cutMode"><option value="copy" selected>Rápido (sem recodificar; o corte pode variar 1–2 s)</option><option value="exact">Preciso (recodifica; mais lento)</option></select>
+</div>
+<div class="opts" id="optsMusic">
+  <input type="file" id="file2" accept="audio/*,.mp3,.m4a,.wav,.ogg,.flac">
+  <button type="button" id="btnFile2">🎵 Escolher música</button>
+  <p class="small" id="fileInfo2">Nenhuma música selecionada</p>
+  <p class="small">O áudio original é trocado pela música, que para quando o vídeo (ou a música) acabar. Início/Fim acima cortam o vídeo.</p>
+</div>
+
+<button id="btnStart">Processar</button>
+<button class="toggleLog" id="btnToggleLog" type="button">Mostrar registro técnico (log)</button>
+
+<p id="status" class="small">Aguardando arquivo...</p>
+
+<div class="progwrap" id="progwrap"><div class="progbar" id="progbar"></div></div>
+<p class="progtxt" id="progtxt"></p>
+
+<div id="logBox"></div>
+
+<div id="downloadBox">
+  <span class="small" id="downloadInfo"></span>
+  <a id="downloadLink" download>⬇️ Baixar resultado</a>
+</div>
+
+<p class="warn">Na primeira conversão, é necessário baixar o mecanismo FFmpeg (cerca de 30&nbsp;MB). A conversão acontece no aparelho e pode demorar; vídeos muito grandes podem exceder a memória disponível, especialmente em celulares.</p>
+
+<button type="button" id="btnOff">📶 Preparar para usar offline (baixa o FFmpeg agora)</button>
+<button type="button" id="btnBaixar">⬇️ Baixar o conversor (HTML + sw.js)</button>
+<p class="small" id="baixarInfo"></p>
+
+<details>
+<summary>📘 Como instalar e usar offline</summary>
+<p><b>Celular/tablet (recomendado):</b> 1) abra o endereço do site (https) no Chrome, com internet; 2) toque em <i>Preparar para usar offline</i> e espere terminar (~30&nbsp;MB); 3) menu ⋮ → <i>Adicionar à tela inicial</i>/<i>Instalar app</i>; 4) pronto, abre sem internet. Não limpe os dados do navegador, senão o offline some.</p>
+<p><b>Computador:</b> 1) clique em <i>Baixar</i> e salve os 2 arquivos na <u>mesma pasta</u> (permita múltiplos downloads); 2) abra o terminal nessa pasta e rode <code>python -m http.server 8080</code> (ou use a extensão Live Server do VS Code); 3) abra <code>http://localhost:8080/video_tools_frontend.html</code> com internet e clique em <i>Preparar para usar offline</i>; 4) depois funciona sem internet, com o servidor local ligado. Dar duplo clique no arquivo (file://) <b>não</b> ativa o offline.</p>
+<p><b>Recomendações:</b> use Chrome/Edge atualizado; prefira vídeos de até ~1&nbsp;GB (acima disso pode faltar memória); no celular use 480p e deixe a tela ligada no carregador; para só trocar de MKV para MP4 use a opção rápida (não recodifica); no corte "rápido" o ponto de corte pode variar 1–2 s.</p>
+</details>
+</div>
+
+<script>
+const $ = (id) => document.getElementById(id);
+const fileInput = $('file');
+const actionSel = $('action');
+const status = $('status');
+const progwrap = $('progwrap');
+const progbar = $('progbar');
+const progtxt = $('progtxt');
+const logBox = $('logBox');
+const downloadBox = $('downloadBox');
+const downloadLink = $('downloadLink');
+const downloadInfo = $('downloadInfo');
+const btnStart = $('btnStart');
+
+/* mostra/esconde as opções específicas de cada ação */
+actionSel.addEventListener('change', () => {
+  const a = actionSel.value;
+  $('optsCompress').classList.toggle('on', a === 'compress');
+  $('optsMp3Compress').classList.toggle('on', a === 'mp3compress');
+  $('optsCut').classList.toggle('on', a === 'cut' || a === 'addmusic');
+  $('optsMusic').classList.toggle('on', a === 'addmusic');
+  $('cutMode').style.display = a === 'cut' ? '' : 'none';
+});
+$('btnFile2').onclick = () => $('file2').click();
+$('file2').addEventListener('change', () => {
+  const m = $('file2').files[0];
+  $('fileInfo2').textContent = m ? `${m.name} — ${(m.size / (1024 * 1024)).toFixed(1)} MB` : 'Nenhuma música selecionada';
+});
+function parseT(v) { // "90", "1:30" ou "01:02:03" → segundos (null se vazio/inválido)
+  v = (v || '').trim().replace(',', '.'); if (!v) return null;
+  const p = v.split(':').map(Number); if (p.some(isNaN)) return null;
+  return p.reduce((acc, x) => acc * 60 + x, 0);
+}
+
+$('btnFile').onclick = () => fileInput.click();
+
+fileInput.addEventListener('change', () => {
+  const f = fileInput.files[0];
+  $('fileInfo').textContent = f ? `${f.name} — ${(f.size / (1024 * 1024)).toFixed(1)} MB` : 'Nenhum arquivo selecionado';
+});
+
+$('btnToggleLog').onclick = () => {
+  const show = !logBox.classList.contains('on');
+  logBox.classList.toggle('on', show);
+  $('btnToggleLog').textContent = show ? 'Esconder registro técnico (log)' : 'Mostrar registro técnico (log)';
+};
+
+const ultimasLinhas = [];
+function log(msg) {
+  ultimasLinhas.push(String(msg));
+  if (ultimasLinhas.length > 40) ultimasLinhas.shift();
+  logBox.textContent += msg + '\n';
+  logBox.scrollTop = logBox.scrollHeight;
+}
+
+function setStatus(msg) { status.textContent = msg; }
+
+function setProgress(frac) {
+  const pct = Math.max(0, Math.min(100, Math.round(frac * 100)));
+  progbar.style.width = pct + '%';
+  progtxt.textContent = pct + '%';
+}
+
+/* ---------- carregamento do FFmpeg (sob demanda, só na primeira vez) ---------- */
+let ffmpeg = null;
+let ffmpegLoadPromise = null;
+
+async function getFFmpeg() {
+  if (ffmpeg) return ffmpeg;
+  if (ffmpegLoadPromise) return ffmpegLoadPromise;
+
+  ffmpegLoadPromise = (async () => {
+    if (typeof FFmpegWASM === 'undefined' || typeof FFmpegUtil === 'undefined') {
+      throw new Error('Não consegui carregar o FFmpeg.wasm — verifique sua internet e tente novamente.');
+    }
+    const { FFmpeg } = FFmpegWASM;
+    const { toBlobURL } = FFmpegUtil;
+
+    const instance = new FFmpeg();
+    instance.on('log', ({ message }) => log(message));
+    instance.on('progress', ({ progress }) => {
+      if (progress >= 0 && progress <= 1) setProgress(progress);
+    });
+
+    // IMPORTANTE: aqui usamos a versão "esm" do núcleo (não "umd"). Como o
+    // classWorkerURL abaixo faz o navegador criar um worker do tipo "módulo",
+    // o núcleo precisa ser carregado no formato de módulo (ESM) também —
+    // com a versão "umd" aparece o erro "failed to import ffmpeg-core.js".
+    const baseURL = 'https://cdn.jsdelivr.net/npm/@ffmpeg/core@0.12.10/dist/esm';
+    // O arquivo que liga o FFmpeg a uma thread separada (classWorkerURL) também
+    // precisa ser baixado como "blob" — se for deixado como link direto do CDN,
+    // o navegador recusa criar o worker com um erro do tipo "Failed to construct
+    // 'Worker': Script at '...814.ffmpeg.js' cannot be accessed from origin...".
+    const ffmpegBaseURL = 'https://cdn.jsdelivr.net/npm/@ffmpeg/ffmpeg@0.12.10/dist/umd';
+
+    // Contador de tempo visível — só para você saber se ainda está rodando
+    // ou se travou de verdade (o download em si não tem barra de progresso).
+    const inicio = Date.now();
+    let etapaAtual = 'preparando';
+    const cronometro = setInterval(() => {
+      const s = Math.round((Date.now() - inicio) / 1000);
+      setStatus(`Baixando o mecanismo do FFmpeg (${etapaAtual})... ${s}s`);
+    }, 1000);
+
+    // Se passar de 2 minutos sem terminar, assume que travou e avisa,
+    // em vez de ficar parado na tela para sempre sem explicação.
+    const comTimeout = (promessa, ms, nomeEtapa) => {
+      etapaAtual = nomeEtapa;
+      log(`[carregando] iniciando etapa: ${nomeEtapa}`);
+      return Promise.race([
+        promessa.then((r) => { log(`[carregando] etapa concluída: ${nomeEtapa}`); return r; }),
+        new Promise((_, rej) => setTimeout(() => rej(new Error(
+          `Demorou demais em "${nomeEtapa}" (mais de ${ms / 1000}s). Pode ser internet lenta/instável, ou o jsdelivr.net bloqueado pela sua rede (firewall, antivírus, rede corporativa/escolar). Veja o registro técnico para detalhes, e tente trocar de rede/Wi-Fi se persistir.`
+        )), ms)),
+      ]);
+    };
+
+    try {
+      const coreURL = await comTimeout(toBlobURL(`${baseURL}/ffmpeg-core.js`, 'text/javascript'), 60000, 'núcleo (ffmpeg-core.js)');
+      const wasmURL = await comTimeout(toBlobURL(`${baseURL}/ffmpeg-core.wasm`, 'application/wasm'), 120000, 'núcleo (ffmpeg-core.wasm, o maior arquivo)');
+      const classWorkerURL = await comTimeout(toBlobURL(`${ffmpegBaseURL}/814.ffmpeg.js`, 'text/javascript'), 60000, 'worker (814.ffmpeg.js)');
+      await comTimeout(instance.load({ coreURL, wasmURL, classWorkerURL }), 60000, 'inicialização final');
+    } finally {
+      clearInterval(cronometro);
+    }
+
+    ffmpeg = instance;
+    return instance;
+  })();
+
+  ffmpegLoadPromise.catch(() => { ffmpegLoadPromise = null; }); // permite tentar de novo se falhar
+  return ffmpegLoadPromise;
+}
+
+/* ---------- processamento ---------- */
+function extensaoDe(nome) {
+  const p = nome.split('.');
+  return p.length > 1 ? p.pop().toLowerCase() : 'mp4';
+}
+
+async function processar() {
+  const f = fileInput.files[0];
+  if (!f) { alert('Selecione um arquivo de vídeo primeiro.'); return; }
+
+  btnStart.disabled = true;
+  downloadBox.classList.remove('on');
+  logBox.textContent = '';
+  progwrap.classList.add('on');
+  setProgress(0);
+
+  const acao = actionSel.value;
+  const entradaExt = extensaoDe(f.name) || 'mp4';
+  const entrada = `entrada.${entradaExt}`;
+  let saida, args, saidaMime, sufixo, planoB = null, planoC = null, f2 = null, entrada2 = null;
+
+  if (acao === 'compress') {
+    const crf = $('compressLevel').value;
+    const [largura, altura] = $('videoSize').value.split('x');
+    saida = 'saida.mp4';
+    // Ajustes pensados para VELOCIDADE (FFmpeg.wasm roda em 1 thread) e para
+    // abrir rápido em qualquer celular/tablet:
+    //  - fps=30: vídeos de 60fps gastam o dobro de processamento à toa
+    //  - sws_flags fast_bilinear: redimensionamento mais rápido
+    //  - preset ultrafast: codifica várias vezes mais rápido que "veryfast"
+    //    (o arquivo fica um pouco maior; o CRF levemente mais alto compensa)
+    //  - tune fastdecode: o aparelho decodifica com menos esforço (abre/seek mais rápido)
+    //  - profile main + level 3.1 + yuv420p: compatível com praticamente todo Android/iOS/tablet
+    //  - g 60: quadro-chave a cada ~2s, então o avanço/pulo no vídeo é rápido
+    //  - faststart: o "índice" fica no início, o vídeo começa a tocar na hora
+    args = [
+      '-i', entrada,
+      '-map', '0:v:0', '-map', '0:a:0?', '-sn', '-dn',
+      '-vf', `scale=w='min(${largura},iw)':h='min(${altura},ih)':force_original_aspect_ratio=decrease:force_divisible_by=2:flags=fast_bilinear,fps=30`,
+      '-c:v', 'libx264', '-profile:v', 'main', '-level', '3.1', '-pix_fmt', 'yuv420p',
+      '-preset', 'ultrafast', '-tune', 'fastdecode', '-crf', crf, '-g', '60',
+      '-c:a', 'aac', '-b:a', '96k', '-ac', '2', '-ar', '44100',
+      '-movflags', '+faststart', saida
+    ];
+    // Planos B para arquivos "difíceis" (HEVC/10 bits/HDR, áudio estranho, vídeo vertical, etc.)
+    const vfSeguro = `scale=w='min(${largura},iw)':h='min(${altura},ih)':force_original_aspect_ratio=decrease:force_divisible_by=2,format=yuv420p`;
+    const base = ['-i', entrada, '-map', '0:v:0'];
+    const video = ['-vf', vfSeguro, '-c:v', 'libx264', '-preset', 'ultrafast', '-crf', crf, '-max_muxing_queue_size', '1024'];
+    planoB = [...base, '-map', '0:a:0?', '-sn', '-dn', ...video, '-c:a', 'aac', '-b:a', '96k', '-ac', '2', '-movflags', '+faststart', saida];
+    planoC = [...base, '-an', '-sn', '-dn', ...video, '-movflags', '+faststart', saida];
+    saidaMime = 'video/mp4'; sufixo = '-celular.mp4';
+  } else if (acao === 'tomp3') {
+    saida = 'saida.mp3';
+    args = ['-i', entrada, '-vn', '-acodec', 'libmp3lame', '-q:a', '2', saida];
+    saidaMime = 'audio/mpeg'; sufixo = '.mp3';
+  } else if (acao === 'towebm') {
+    saida = 'saida.webm';
+    args = ['-i', entrada, '-c:v', 'libvpx-vp9', '-crf', '32', '-b:v', '0', '-c:a', 'libopus', '-b:a', '128k', saida];
+    saidaMime = 'video/webm'; sufixo = '.webm';
+  } else if (acao === 'extract') { // copia o áudio sem recodificar — rápido e sem perda
+    saida = 'saida.m4a';
+    args = ['-i', entrada, '-vn', '-acodec', 'copy', saida];
+    saidaMime = 'audio/mp4'; sufixo = '.m4a';
+  } else if (acao === 'tomkv') {
+    saida = 'saida.mkv'; saidaMime = 'video/x-matroska'; sufixo = '.mkv';
+    args = ['-i', entrada, '-map', '0', '-c', 'copy', saida];
+    planoB = ['-i', entrada, '-map', '0:v:0', '-map', '0:a?', '-c', 'copy', saida];
+    planoC = ['-i', entrada, '-map', '0:v:0', '-map', '0:a?', '-c:v', 'libx264', '-preset', 'ultrafast', '-crf', '26', '-pix_fmt', 'yuv420p', '-c:a', 'aac', saida];
+  } else if (acao === 'remux') {
+    saida = 'saida.mp4'; saidaMime = 'video/mp4'; sufixo = '-convertido.mp4';
+    args = ['-i', entrada, '-map', '0:v:0', '-map', '0:a:0?', '-sn', '-dn', '-c:v', 'copy', '-c:a', 'aac', '-b:a', '160k', '-movflags', '+faststart', saida];
+    planoB = ['-i', entrada, '-map', '0:v:0', '-map', '0:a:0?', '-sn', '-dn', '-c:v', 'libx264', '-preset', 'ultrafast', '-crf', '26', '-pix_fmt', 'yuv420p', '-c:a', 'aac', '-b:a', '160k', '-movflags', '+faststart', saida];
+  } else if (acao === 'cut' || acao === 'addmusic') {
+    const ini = parseT($('tIni').value) || 0, fim = parseT($('tFim').value);
+    if (fim !== null && fim <= ini) { alert('O fim precisa ser maior que o início.'); btnStart.disabled = false; return; }
+    const dur = fim !== null ? ['-t', String(fim - ini)] : [];
+    if (acao === 'cut') {
+      const audio = (f.type || '').startsWith('audio') || ['mp3', 'm4a', 'wav', 'ogg', 'aac', 'flac'].includes(entradaExt);
+      const exato = !audio && $('cutMode').value === 'exact';
+      const ext = exato ? (entradaExt === 'mkv' ? 'mkv' : 'mp4') : entradaExt;
+      saida = `saida.${ext}`; sufixo = `-corte.${ext}`;
+      saidaMime = exato ? 'video/mp4' : (f.type || (audio ? 'audio/mpeg' : 'video/mp4'));
+      const re = ['-c:v', 'libx264', '-preset', 'ultrafast', '-crf', '26', '-pix_fmt', 'yuv420p', '-c:a', 'aac', '-b:a', '128k', '-movflags', '+faststart'];
+      args = exato ? ['-ss', String(ini), '-i', entrada, ...dur, ...re, saida]
+                   : ['-ss', String(ini), '-i', entrada, ...dur, '-c', 'copy', '-avoid_negative_ts', 'make_zero', saida];
+      if (!exato && !audio && ['mp4', 'mkv', 'mov'].includes(entradaExt)) planoB = ['-ss', String(ini), '-i', entrada, ...dur, ...re, saida];
+    } else {
+      f2 = $('file2').files[0];
+      if (!f2) { alert('Escolha a música primeiro.'); btnStart.disabled = false; return; }
+      entrada2 = `musica.${extensaoDe(f2.name)}`;
+      saida = 'saida.mp4'; saidaMime = 'video/mp4'; sufixo = '-com-musica.mp4';
+      const mk = (cv) => ['-ss', String(ini), '-i', entrada, '-i', entrada2, ...dur, '-map', '0:v:0', '-map', '1:a:0', ...cv, '-c:a', 'aac', '-b:a', '160k', '-shortest', '-movflags', '+faststart', saida];
+      args = mk(['-c:v', 'copy']);
+      planoB = mk(['-c:v', 'libx264', '-preset', 'ultrafast', '-crf', '26', '-pix_fmt', 'yuv420p']);
+    }
+  } else { // mp3compress
+    const modo = $('mp3Mode').value;
+    saida = 'saida.mp3';
+    saidaMime = 'audio/mpeg'; sufixo = '-comprimido.mp3';
+    if (modo === 'meta') {
+      // "-acodec copy" NÃO recodifica — copia os bytes de áudio originais tal
+      // como estão, só removendo metadados/capa embutida. Isso sim é 0% de
+      // perda de verdade (as outras opções recodificam e perdem um pouco).
+      args = ['-i', entrada, '-map', '0:a', '-acodec', 'copy', '-map_metadata', '-1', '-id3v2_version', '0', saida];
+    } else {
+      const q = modo === 'q2' ? '2' : modo === 'q4' ? '4' : '6';
+      args = ['-i', entrada, '-map', '0:a', '-acodec', 'libmp3lame', '-q:a', q, '-map_metadata', '-1', '-id3v2_version', '0', saida];
+    }
+  }
+
+  // Lista de tentativas: se a primeira falhar, tenta modos mais compatíveis
+  const tentativas = [{ nome: 'rápido', args, mount: true }];
+  if (planoB) {
+    tentativas.push({ nome: 'compatível', args: planoB, mount: false });
+    if (planoC) tentativas.push({ nome: acao === 'compress' ? 'compatível, sem áudio' : 'recodificando', args: planoC, mount: false, semAudio: acao === 'compress' });
+  } else {
+    tentativas.push({ nome: 'compatível', args, mount: false });
+  }
+
+  let sucesso = false, ultimoErro = null;
+  ultimasLinhas.length = 0;
+
+  try {
+    for (let n = 0; n < tentativas.length && !sucesso; n++) {
+      const t = tentativas[n];
+      let ff = null, montado = false;
+      try {
+        if (n > 0) {
+          log(`--- Tentativa ${n + 1}: modo ${t.nome} ---`);
+          setStatus(`Deu erro no modo anterior. Tentando novamente em modo ${t.nome}...`);
+          setProgress(0);
+        }
+        ff = await getFFmpeg();
+
+        setStatus('Carregando o arquivo...');
+        await ff.unmount('/in').catch(() => {}); // limpa sobra de execução anterior
+        let entradaFinal = entrada;
+        if (t.mount) {
+          // WORKERFS: lê o arquivo direto do disco, sem copiar tudo para a memória.
+          try {
+            await ff.createDir('/in').catch(() => {});
+            await ff.mount('WORKERFS', { files: [new File([f], entrada), ...(f2 ? [new File([f2], entrada2)] : [])] }, '/in');
+            entradaFinal = '/in/' + entrada;
+            montado = true;
+          } catch (e) {
+            log('WORKERFS indisponível, usando cópia em memória: ' + (e.message || e));
+          }
+        }
+        if (!montado) {
+          const { fetchFile } = FFmpegUtil;
+          await ff.writeFile(entrada, await fetchFile(f));
+          if (f2) await ff.writeFile(entrada2, await fetchFile(f2));
+        }
+        const a = t.args.map((x) => (x === entrada ? entradaFinal : (entrada2 && x === entrada2) ? (montado ? '/in/' + entrada2 : entrada2) : x));
+
+        setStatus(acao === 'compress' ? 'Convertendo para MP4 leve (pode levar alguns minutos, dependendo do aparelho e do vídeo)...' : 'Processando (pode levar alguns minutos)...');
+        let codigo;
+        try {
+          codigo = await ff.exec(a);
+        } finally {
+          if (montado) await ff.unmount('/in').catch(() => {});
+          else { await ff.deleteFile(entrada).catch(() => {}); if (f2) await ff.deleteFile(entrada2).catch(() => {}); }
+        }
+        // O ffmpeg.wasm NÃO lança erro quando falha: devolve um código diferente de 0.
+        if (codigo !== 0) {
+          const resumo = ultimasLinhas.filter((l) => l.trim()).slice(-3).join(' | ');
+          throw new Error(`O FFmpeg não conseguiu processar este arquivo (código ${codigo}). ${resumo}`);
+        }
+
+        setStatus('Finalizando...');
+        const data = await ff.readFile(saida);
+
+        const blob = new Blob([data.buffer], { type: saidaMime });
+        const url = URL.createObjectURL(blob);
+        const nomeBase = f.name.replace(/\.[^/.]+$/, '');
+
+        downloadLink.href = url;
+        downloadLink.download = nomeBase + sufixo;
+        downloadInfo.textContent = `Pronto! ${(blob.size / (1024 * 1024)).toFixed(1)} MB` + (t.semAudio ? ' — atenção: ficou SEM áudio (o áudio deste arquivo não pôde ser convertido).' : '');
+        downloadBox.classList.add('on');
+        setStatus(t.semAudio ? 'Concluído, mas sem áudio ⚠️' : 'Concluído! ✅');
+        setProgress(1);
+        sucesso = true;
+
+        await ff.deleteFile(saida).catch(() => {});
+      } catch (erro) {
+        ultimoErro = erro;
+        console.error(erro);
+        log('ERRO (' + t.nome + '): ' + (erro.message || erro));
+        // Após uma falha o FFmpeg pode ficar em estado ruim (ex.: falta de memória).
+        // Descarta a instância para a próxima tentativa começar limpa.
+        try { if (ff) ff.terminate(); } catch (e) {}
+        ffmpeg = null; ffmpegLoadPromise = null;
+      }
+    }
+    if (!sucesso) {
+      setStatus('Erro: ' + ((ultimoErro && ultimoErro.message) || ultimoErro) + ' — abra o "registro técnico (log)" para ver os detalhes.');
+    }
+  } finally {
+    btnStart.disabled = false;
+  }
+}
+
+btnStart.onclick = processar;
+
+$('btnOff').onclick = async () => {
+  setStatus('Baixando o FFmpeg para uso offline...');
+  try { await getFFmpeg(); setStatus('Pronto para usar offline ✅ — recarregue a página uma vez.'); }
+  catch (e) { setStatus('Erro: ' + (e.message || e)); }
+};
+$('btnBaixar').onclick = async () => {
+  try {
+    for (const nome of ['video_tools_frontend.html', 'sw.js']) {
+      const r = await fetch('./' + nome, { cache: 'no-store' });
+      if (!r.ok) throw new Error(nome + ' (' + r.status + ')');
+      const a = document.createElement('a');
+      a.href = URL.createObjectURL(await r.blob()); a.download = nome;
+      document.body.appendChild(a); a.click(); a.remove();
+      await new Promise((ok) => setTimeout(ok, 800));
+    }
+    $('baixarInfo').textContent = 'Baixado! Coloque os 2 arquivos na mesma pasta.';
+  } catch (e) {
+    $('baixarInfo').textContent = 'Não foi possível baixar daqui (abra pelo site ou servidor, não pelo arquivo local): ' + (e.message || e);
+  }
+};
+</script>
+<script>
+if ('serviceWorker' in navigator) {
+  window.addEventListener('load', () => {
+    // Os dois aplicativos ficam na mesma origem/escopo e devem compartilhar
+    // um único service worker; um segundo registro substitui o primeiro.
+    navigator.serviceWorker.register('./sw.js?v=20261020-1', { updateViaCache: 'none' })
+      .catch((erro) => console.warn('Não foi possível ativar o modo offline:', erro));
+  });
+}
+</script>
+</body>
+</html>
